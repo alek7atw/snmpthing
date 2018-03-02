@@ -11,7 +11,6 @@ import (
 	"errors"
 )
 
-
 var file *xlsx.File
 var sheet *xlsx.Sheet
 
@@ -22,6 +21,7 @@ type Switch struct {
 }
 
 var streamOfSwChanel chan Switch
+var update chan int
 
 func ipDecode(ip uint) string {
 	return fmt.Sprintf("%d.%d.%d.%d", (ip>>24)%0xFF, (ip>>16)&0xFF, (ip>>8)&0xFF, ip&0xFF)
@@ -32,10 +32,9 @@ func wrRow(data Switch) {
 	row.WriteStruct(&data, -1)
 }
 
-func getdata(ip string) error{
+func getdata(ip string) error {
 	var sw Switch
 	s, err := gosnmp.NewGoSNMP(ip, "public", gosnmp.Version2c, 1)
-	fmt.Println(ip)
 	if err != nil {
 		return err
 	}
@@ -69,8 +68,29 @@ func getdata(ip string) error{
 	return nil
 }
 
+func waiter(num int) {
+	var sw Switch
+	counter := 0
+	for {
+		select {
+		case sw = <-streamOfSwChanel:
+			wrRow(sw)
+			counter++
+			if counter >= num {
+				return
+			}
+		case num = <-update:
+			if counter >= num {
+				return
+			}
+		}
+	}
+}
+
 func main() {
 	var err error
+	streamOfSwChanel = make(chan Switch)
+	update = make(chan int)
 
 	file = xlsx.NewFile()
 	sheet, err = file.AddSheet("Sheet1")
@@ -91,10 +111,10 @@ func main() {
 	if err != nil {
 		fmt.Printf("Error select from database: %v\n", err)
 	}
+	num := len(HostBase)
 	defer db.Close()
 
 	for _, ht := range HostBase {
-		ip := ipDecode(ht.Uint(0))
 		go func(ip string) {
 			/*if ip == "192.168.111.44" {
 				log.Println(ip, " : ","Slow as fuck")
@@ -103,16 +123,17 @@ func main() {
 			}*/
 			err := getdata(ip)
 			if err != nil {
-				log.Println(ip, " : ",err)
+				log.Println(ip, " : ", err)
+				num--
+				update <- num
+				return
 			}
 			return
-		}(ip)
+		}(ipDecode(ht.Uint(0)))
 	}
 	fmt.Println("done")
 
-	for sw := range streamOfSwChanel {
-		wrRow(sw)
-	}
+	waiter(num)
 
 	err = file.Save("switches.xlsx")
 	if err != nil {
