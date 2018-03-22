@@ -9,15 +9,27 @@ import (
 	"github.com/tealeg/xlsx"
 	"github.com/ziutek/mymysql/mysql"
 	"errors"
+	"io/ioutil"
+	"encoding/json"
 )
-
-var file *xlsx.File
-var sheet *xlsx.Sheet
 
 type Switch struct {
 	ProductNum string
 	SerialNum  string
 	Hostname   string
+}
+
+var dataAsses struct {
+	User     string `json:"user"`
+	Password string `json:"password"`
+}
+
+func loadConfig() error {
+	jsonData, err := ioutil.ReadFile("config.json")
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(jsonData, &dataAsses)
 }
 
 var streamOfSwChanel chan Switch
@@ -27,9 +39,16 @@ func ipDecode(ip uint) string {
 	return fmt.Sprintf("%d.%d.%d.%d", (ip>>24)%0xFF, (ip>>16)&0xFF, (ip>>8)&0xFF, ip&0xFF)
 }
 
-func wrRow(data Switch) {
+func wrRow(data Switch, sheet *xlsx.Sheet) {
 	row := sheet.AddRow()
-	row.WriteStruct(&data, -1)
+	cell1 := row.AddCell()
+	cell1.Value = data.ProductNum
+	cell2 := row.AddCell()
+	cell2.Value = data.SerialNum
+	cell3 := row.AddCell()
+	cell3.Value = ""
+	cell4 := row.AddCell()
+	cell4.Value = data.Hostname
 }
 
 func getdata(ip string) error {
@@ -71,16 +90,44 @@ func getdata(ip string) error {
 func waiter(num int) {
 	var sw Switch
 	counter := 0
+	iteration := 1
+
+	file := xlsx.NewFile()
+	sheet, err := file.AddSheet("Sheet1")
+	if err != nil {
+		fmt.Printf(err.Error())
+	}
+
 	for {
 		select {
 		case sw = <-streamOfSwChanel:
-			wrRow(sw)
+			wrRow(sw, sheet)
 			counter++
+			if counter%50 == 0 {
+				err = file.Save(fmt.Sprintf("switches%d.xlsx", iteration))
+				if err != nil {
+					log.Println(err.Error())
+				}
+				iteration++
+				file = xlsx.NewFile()
+				sheet, err = file.AddSheet("Sheet1")
+				if err != nil {
+					fmt.Printf(err.Error())
+				}
+			}
 			if counter >= num {
+				err = file.Save(fmt.Sprintf("switches%d.xlsx", iteration))
+				if err != nil {
+					log.Println(err.Error())
+				}
 				return
 			}
 		case num = <-update:
 			if counter >= num {
+				err = file.Save(fmt.Sprintf("switches%d.xlsx", iteration))
+				if err != nil {
+					log.Println(err.Error())
+				}
 				return
 			}
 		}
@@ -88,18 +135,13 @@ func waiter(num int) {
 }
 
 func main() {
-	var err error
 	streamOfSwChanel = make(chan Switch)
 	update = make(chan int)
 
-	file = xlsx.NewFile()
-	sheet, err = file.AddSheet("Sheet1")
-	if err != nil {
-		fmt.Printf(err.Error())
-	}
+	loadConfig()
 
-	db := mysql.New("tcp", "", "212.193.32.4:3306", "develop", "b1gbr0ther", "netmap")
-	err = db.Connect()
+	db := mysql.New("tcp", "", "212.193.32.4:3306", dataAsses.User, dataAsses.Password, "netmap")
+	err := db.Connect()
 	if err != nil {
 		fmt.Printf("Error connecting to database: %v\n", err)
 		return
@@ -116,11 +158,6 @@ func main() {
 
 	for _, ht := range HostBase {
 		go func(ip string) {
-			/*if ip == "192.168.111.44" {
-				log.Println(ip, " : ","Slow as fuck")
-				wgWriters.Done()
-				return
-			}*/
 			err := getdata(ip)
 			if err != nil {
 				log.Println(ip, " : ", err)
@@ -131,12 +168,6 @@ func main() {
 			return
 		}(ipDecode(ht.Uint(0)))
 	}
-	fmt.Println("done")
 
 	waiter(num)
-
-	err = file.Save("switches.xlsx")
-	if err != nil {
-		fmt.Printf(err.Error())
-	}
 }
